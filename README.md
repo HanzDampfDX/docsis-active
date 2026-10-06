@@ -1,31 +1,34 @@
 # docsis-active
 
-`docsis-active.py` is a small Linux monitor for passively observing **active DOCSIS upstream data SIDs** from downstream MAP messages.
+`docsis-active.py` is a small Linux monitor that estimates the number of recently active DOCSIS cable-modem SIDs by observing **Ranging Response** messages on a DOCSIS downstream channel.
 
-It tunes a DOCSIS 3.0 downstream channel with `dvbv5-zap`, pipes the MPEG transport stream into `tshark`, decodes DOCSIS MAP messages, and counts unique SIDs that received data grants during a rolling time window.
+It tunes a DOCSIS 3.0 downstream channel with `dvbv5-zap`, pipes the MPEG transport stream into `tshark`, extracts `docsis_rngrsp.sid`, and counts unique ranging SIDs seen within a rolling time window.
+
+## Example output
+
+```text
+DOCSIS Segment Monitor
+======================
+Kanal: DOCSIS570
+Fenster: 30 Sekunden
+
+22:31:05 aktive Ranging-SIDs ≈ 114
+22:31:10 aktive Ranging-SIDs ≈ 226
+22:31:15 aktive Ranging-SIDs ≈ 318
+22:31:20 aktive Ranging-SIDs ≈ 364
+22:31:25 aktive Ranging-SIDs ≈ 381
+22:31:30 aktive Ranging-SIDs ≈ 387
+```
+
+During the first 30 seconds after startup the counter normally rises as the rolling window fills. Afterwards it fluctuates as SIDs enter and leave the observation window.
 
 ## What it measures
 
-By default the monitor counts SIDs seen with these Interval Usage Codes (IUCs):
+The monitor records the timestamp of every SID seen in a DOCSIS Ranging Response. A SID remains "active" until it has not been observed for the configured window, 30 seconds by default.
 
-- IUC 5 — Short Data Grant
-- IUC 6 — Long Data Grant
-- IUC 9 — Advanced PHY Short Data Grant
-- IUC 10 — Advanced PHY Long Data Grant
+This is intended as a **segment population/activity estimate**. The `≈` symbol is deliberate: a ranging SID is not a customer identity, and the observed count should not be treated as an exact subscriber count. DOCSIS version, CMTS implementation, ranging behaviour, channel bonding, packet loss and the selected observation window can all influence the result.
 
-A result such as:
-
-```text
-22:31:25 active data SIDs: 354  IUC5=134  IUC6=125  IUC9=50  IUC10=45
-```
-
-means that **354 distinct SIDs received at least one upstream data grant during the configured rolling window**.
-
-### Important limitation
-
-An active SID is **not necessarily one physical cable modem or one subscriber**. DOCSIS uses SIDs for upstream service flows and scheduling. A modem can have more than one service flow/SID, and SID assignments are temporary. Therefore this tool should be used as a **segment activity indicator**, not as an exact subscriber counter.
-
-The tool also does **not** identify subscribers, decode payload data, or calculate exact per-modem throughput.
+The tool does not decode customer payload data and does not attempt to associate SIDs with subscriber identities.
 
 ## Requirements
 
@@ -34,57 +37,43 @@ The tool also does **not** identify subscribers, decode payload data, or calcula
 - `dvbv5-zap` from `dvb-tools`
 - `tshark` / Wireshark with DOCSIS dissectors
 
-On Debian/Ubuntu:
+Debian/Ubuntu:
 
 ```bash
 sudo apt install python3 dvb-tools tshark
 ```
 
-The user running the monitor needs permission to access the DVB adapter, typically through membership in the appropriate device group.
+The user running the program also needs permission to access the DVB adapter.
 
 ## Quick start
 
-Copy the example tuning file and adjust it for your network:
+Copy and adapt the example tuning configuration:
 
 ```bash
 cp docsis-all.conf.example ~/docsis-all.conf
 ```
 
-Then run:
+Run the monitor:
 
 ```bash
-./docsis-active.py --config ~/docsis-all.conf --channel DOCSIS570
+python3 docsis-active.py --config ~/docsis-all.conf --channel DOCSIS570
 ```
 
-Default settings:
-
-- rolling window: 30 seconds
-- output interval: 5 seconds
-- data IUCs: 5,6,9,10
-
-Example with a 60-second window:
-
-```bash
-./docsis-active.py --config ~/docsis-all.conf --channel DOCSIS570 --window 60
-```
-
-## Example output
+Defaults:
 
 ```text
-DOCSIS Active Data SID Monitor
-==============================
-Channel: DOCSIS570
-Window: 30 s
-Data IUCs: 5,6,9,10
+channel:  DOCSIS570
+window:   30 seconds
+interval: 5 seconds
+```
 
-22:31:15 active data SIDs: 318  IUC5=121  IUC6=110  IUC9=46  IUC10=41
-22:31:20 active data SIDs: 342  IUC5=128  IUC6=121  IUC9=49  IUC10=44
-22:31:25 active data SIDs: 354  IUC5=134  IUC6=125  IUC9=50  IUC10=45
+A different observation window can be selected with:
+
+```bash
+python3 docsis-active.py --config ~/docsis-all.conf --channel DOCSIS570 --window 60
 ```
 
 ## How it works
-
-The processing chain is:
 
 ```text
 DVB-C tuner
@@ -92,26 +81,38 @@ DVB-C tuner
    v
 dvbv5-zap
    |
-   | MPEG-TS
+   | MPEG transport stream
    v
 tshark DOCSIS dissector
    |
-   | DOCSIS MAP: SID + IUC
+   | docsis_rngrsp.sid
    v
 rolling unique-SID counter
 ```
 
-`dvbv5-zap` is used as the transport-stream reader rather than directly reading `/dev/dvb/adapter*/dvr0` with `cat`. This is more robust on systems where direct reads can terminate with DVB buffer-overrun errors such as `Value too large for defined data type`.
+The relevant tshark operation is conceptually equivalent to:
+
+```bash
+tshark -l -r - -Y 'docsis_rngrsp.sid' -T fields -E aggregator=, -E occurrence=a -e docsis_rngrsp.sid
+```
+
+`dvbv5-zap` is used as the DVB DVR reader rather than `cat /dev/dvb/adapter0/dvr0`. On some DVB devices direct reads can terminate on a kernel DVB buffer overrun with an error such as:
+
+```text
+Value too large for defined data type
+```
+
+`dvbv5-zap` is generally better suited to keeping the transport-stream pipeline running.
 
 ## Tuning configuration
 
-The included `docsis-all.conf.example` contains an example EuroDOCSIS 3.0 256-QAM / 6.952 MSym/s channel set. Frequencies are network-specific; verify the downstream frequencies for your own cable segment.
+The included `docsis-all.conf.example` contains example EuroDOCSIS 3.0 256-QAM channels using 6.952 MSym/s. Frequencies are network-specific and must be adjusted to the local cable network.
 
-DOCSIS 3.1 OFDM blocks cannot normally be demodulated by a conventional DVB-C tuner. This tool relies on DOCSIS MAP messages carried on a demodulatable DOCSIS 3.0 SC-QAM downstream.
+A conventional DVB-C tuner can demodulate DOCSIS 3.0 SC-QAM downstreams. It cannot normally demodulate a DOCSIS 3.1 OFDM block directly, but DOCSIS management traffic visible on the selected SC-QAM channel can still be useful for segment observation.
 
-## Privacy and scope
+## Privacy
 
-The monitor intentionally keeps only transient SID timestamps in memory. It does not store cable-modem MAC addresses, customer identities, or user payloads.
+The program keeps only SID timestamps in memory. It does not store modem MAC addresses, customer identities or payloads.
 
 ## License
 
