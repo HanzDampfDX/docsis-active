@@ -12,8 +12,8 @@ import time
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Estimate active DOCSIS cable modems by counting unique SIDs "
-            "seen in Ranging Response messages during a rolling time window."
+            "Estimate active DOCSIS ranging/maintenance SIDs by counting unique "
+            "SIDs in MAP IUC 3/4 entries during a rolling time window."
         )
     )
     parser.add_argument(
@@ -30,7 +30,7 @@ def parse_args():
         "--window",
         type=float,
         default=30.0,
-        help="Rolling ranging-SID window in seconds (default: 30)",
+        help="Rolling SID window in seconds (default: 30)",
     )
     parser.add_argument(
         "--interval",
@@ -67,33 +67,37 @@ def main():
     last_seen = {}
     lock = threading.Lock()
 
-    # Tune the selected DOCSIS downstream channel and write the full MPEG-TS
-    # to stdout. Using dvbv5-zap as reader is more robust than `cat dvr0`
-    # on DVB devices that may report EOVERFLOW/buffer overruns.
+    # DVB-C tunen und kompletten Transportstream nach stdout ausgeben.
+    # dvbv5-zap ist hier robuster als ein direktes `cat` auf dvr0, weil
+    # DVB-Pufferüberläufe den Reader sonst beenden können.
     zap = subprocess.Popen(
-        [dvbv5_zap, "-c", config, "-P", "-r", "-o", "-", args.channel],
+        [
+            dvbv5_zap,
+            "-c", config,
+            "-P",
+            "-r",
+            "-o", "-",
+            args.channel,
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
 
-    # Decode DOCSIS Ranging Response messages. A SID is recorded whenever
-    # tshark exposes docsis_rngrsp.sid in the downstream transport stream.
+    # DOCSIS MAPs aus dem MPEG-TS dekodieren. Gezählt werden SIDs aus
+    # Initial/Station Maintenance (IUC 3/4), wie in der ursprünglichen
+    # funktionierenden Variante des Monitors.
     tshark = subprocess.Popen(
         [
             tshark_bin,
             "-l",
-            "-r",
-            "-",
-            "-Y",
-            "docsis_rngrsp.sid",
-            "-T",
-            "fields",
-            "-E",
-            "aggregator=,",
-            "-E",
-            "occurrence=a",
-            "-e",
-            "docsis_rngrsp.sid",
+            "-r", "-",
+            "-Y", "docsis_map",
+            "-T", "fields",
+            "-E", "separator=;",
+            "-E", "aggregator=,",
+            "-E", "occurrence=a",
+            "-e", "docsis_map.sid",
+            "-e", "docsis_map.iuc",
         ],
         stdin=zap.stdout,
         stdout=subprocess.PIPE,
@@ -110,27 +114,34 @@ def main():
             return
 
         for line in tshark.stdout:
+            fields = line.strip().split(";")
+
+            if len(fields) != 2:
+                continue
+
+            sids = fields[0].split(",")
+            iucs = fields[1].split(",")
             now = time.monotonic()
 
-            for sid_text in line.strip().split(","):
-                sid_text = sid_text.strip()
-                if not sid_text:
-                    continue
-
+            for sid_text, iuc_text in zip(sids, iucs):
                 try:
-                    sid = int(sid_text, 0)
+                    sid = int(sid_text)
+                    iuc = int(iuc_text)
                 except ValueError:
                     continue
 
-                # Ignore reserved/special values if they appear.
-                if sid <= 0 or sid == 0x3FFF:
+                # Ranging / Maintenance opportunities.
+                if iuc not in (3, 4):
+                    continue
+
+                # SID 0 und Broadcast SID 0x3fff ignorieren.
+                if sid <= 0 or sid == 16383:
                     continue
 
                 with lock:
                     last_seen[sid] = now
 
-    thread = threading.Thread(target=reader, daemon=True)
-    thread.start()
+    threading.Thread(target=reader, daemon=True).start()
 
     print("DOCSIS Segment Monitor")
     print("======================")
@@ -142,25 +153,28 @@ def main():
         while True:
             time.sleep(args.interval)
 
-            if zap.poll() is not None:
-                print("Fehler: dvbv5-zap wurde unerwartet beendet.", file=sys.stderr)
+            if tshark.poll() is not None:
+                print("tshark wurde beendet:")
+                if tshark.stderr is not None:
+                    print(tshark.stderr.read())
                 return 1
 
-            if tshark.poll() is not None:
-                print("Fehler: tshark wurde unerwartet beendet.", file=sys.stderr)
-                if tshark.stderr is not None:
-                    error_text = tshark.stderr.read().strip()
-                    if error_text:
-                        print(error_text, file=sys.stderr)
+            if zap.poll() is not None:
+                print("dvbv5-zap wurde beendet.")
                 return 1
 
             now = time.monotonic()
-            cutoff = now - args.window
 
             with lock:
-                stale = [sid for sid, ts in last_seen.items() if ts < cutoff]
+                stale = [
+                    sid
+                    for sid, ts in last_seen.items()
+                    if now - ts > args.window
+                ]
+
                 for sid in stale:
                     del last_seen[sid]
+
                 count = len(last_seen)
 
             print(
@@ -172,15 +186,11 @@ def main():
     except KeyboardInterrupt:
         print("\nBeendet.")
         return 0
+
     finally:
         for process in (tshark, zap):
             if process.poll() is None:
                 process.terminate()
-        for process in (tshark, zap):
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
 
 
 if __name__ == "__main__":
