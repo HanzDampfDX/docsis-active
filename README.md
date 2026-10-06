@@ -118,6 +118,10 @@ The included `docsis-all.conf.example` contains example EuroDOCSIS 3.0 256-QAM c
 
 A conventional DVB-C tuner can demodulate DOCSIS 3.0 SC-QAM downstreams. It cannot normally demodulate a DOCSIS 3.1 OFDM block directly, but DOCSIS management traffic visible on the selected SC-QAM channel can still be useful for segment observation.
 
+## Credits and related work
+
+Background material, related projects and acknowledgements used while developing this monitor are collected in the separate **[docsis-credits](https://github.com/HanzDampfDX/docsis-credits)** repository.
+
 ## Privacy
 
 The program keeps only SID timestamps in memory. It does not store modem MAC addresses, customer identities or payloads.
