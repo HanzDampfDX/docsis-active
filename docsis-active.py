@@ -11,7 +11,10 @@ import time
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Monitor active DOCSIS upstream data SIDs from downstream MAP messages."
+        description=(
+            "Estimate active DOCSIS cable modems by counting unique SIDs "
+            "seen in Ranging Response messages during a rolling time window."
+        )
     )
     parser.add_argument(
         "--config",
@@ -27,7 +30,7 @@ def parse_args():
         "--window",
         type=float,
         default=30.0,
-        help="Rolling activity window in seconds (default: 30)",
+        help="Rolling ranging-SID window in seconds (default: 30)",
     )
     parser.add_argument(
         "--interval",
@@ -35,18 +38,13 @@ def parse_args():
         default=5.0,
         help="Output interval in seconds (default: 5)",
     )
-    parser.add_argument(
-        "--iucs",
-        default="5,6,9,10",
-        help="Comma-separated IUCs counted as data grants (default: 5,6,9,10)",
-    )
     return parser.parse_args()
 
 
 def require_command(name):
     path = shutil.which(name)
     if not path:
-        print(f"error: required command not found: {name}", file=sys.stderr)
+        print(f"Fehler: benötigtes Programm nicht gefunden: {name}", file=sys.stderr)
         sys.exit(2)
     return path
 
@@ -56,28 +54,30 @@ def main():
     config = os.path.expanduser(args.config)
 
     if args.window <= 0 or args.interval <= 0:
-        print("error: --window and --interval must be > 0", file=sys.stderr)
+        print("Fehler: --window und --interval müssen > 0 sein", file=sys.stderr)
         return 2
 
-    try:
-        data_iucs = {int(x.strip(), 0) for x in args.iucs.split(",") if x.strip()}
-    except ValueError:
-        print("error: invalid --iucs value", file=sys.stderr)
+    if not os.path.isfile(config):
+        print(f"Fehler: Konfigurationsdatei nicht gefunden: {config}", file=sys.stderr)
         return 2
 
     dvbv5_zap = require_command("dvbv5-zap")
     tshark_bin = require_command("tshark")
 
     last_seen = {}
-    last_iuc = {}
     lock = threading.Lock()
 
+    # Tune the selected DOCSIS downstream channel and write the full MPEG-TS
+    # to stdout. Using dvbv5-zap as reader is more robust than `cat dvr0`
+    # on DVB devices that may report EOVERFLOW/buffer overruns.
     zap = subprocess.Popen(
         [dvbv5_zap, "-c", config, "-P", "-r", "-o", "-", args.channel],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
 
+    # Decode DOCSIS Ranging Response messages. A SID is recorded whenever
+    # tshark exposes docsis_rngrsp.sid in the downstream transport stream.
     tshark = subprocess.Popen(
         [
             tshark_bin,
@@ -85,19 +85,15 @@ def main():
             "-r",
             "-",
             "-Y",
-            "docsis_map",
+            "docsis_rngrsp.sid",
             "-T",
             "fields",
-            "-E",
-            "separator=;",
             "-E",
             "aggregator=,",
             "-E",
             "occurrence=a",
             "-e",
-            "docsis_map.sid",
-            "-e",
-            "docsis_map.iuc",
+            "docsis_rngrsp.sid",
         ],
         stdin=zap.stdout,
         stdout=subprocess.PIPE,
@@ -112,40 +108,34 @@ def main():
     def reader():
         if tshark.stdout is None:
             return
-        for line in tshark.stdout:
-            fields = line.rstrip("\n").split(";")
-            if len(fields) != 2:
-                continue
 
-            sids = fields[0].split(",")
-            iucs = fields[1].split(",")
+        for line in tshark.stdout:
             now = time.monotonic()
 
-            for sid_text, iuc_text in zip(sids, iucs):
+            for sid_text in line.strip().split(","):
+                sid_text = sid_text.strip()
+                if not sid_text:
+                    continue
+
                 try:
                     sid = int(sid_text, 0)
-                    iuc = int(iuc_text, 0)
                 except ValueError:
                     continue
 
-                if iuc not in data_iucs:
-                    continue
-
+                # Ignore reserved/special values if they appear.
                 if sid <= 0 or sid == 0x3FFF:
                     continue
 
                 with lock:
                     last_seen[sid] = now
-                    last_iuc[sid] = iuc
 
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
 
-    print("DOCSIS Active Data SID Monitor")
-    print("==============================")
-    print(f"Channel: {args.channel}")
-    print(f"Window: {args.window:g} s")
-    print("Data IUCs: " + ",".join(str(x) for x in sorted(data_iucs)))
+    print("DOCSIS Segment Monitor")
+    print("======================")
+    print(f"Kanal: {args.channel}")
+    print(f"Fenster: {args.window:g} Sekunden")
     print()
 
     try:
@@ -153,11 +143,11 @@ def main():
             time.sleep(args.interval)
 
             if zap.poll() is not None:
-                print("error: dvbv5-zap terminated unexpectedly", file=sys.stderr)
+                print("Fehler: dvbv5-zap wurde unerwartet beendet.", file=sys.stderr)
                 return 1
 
             if tshark.poll() is not None:
-                print("error: tshark terminated unexpectedly", file=sys.stderr)
+                print("Fehler: tshark wurde unerwartet beendet.", file=sys.stderr)
                 if tshark.stderr is not None:
                     error_text = tshark.stderr.read().strip()
                     if error_text:
@@ -170,30 +160,27 @@ def main():
             with lock:
                 stale = [sid for sid, ts in last_seen.items() if ts < cutoff]
                 for sid in stale:
-                    last_seen.pop(sid, None)
-                    last_iuc.pop(sid, None)
+                    del last_seen[sid]
+                count = len(last_seen)
 
-                total = len(last_seen)
-                counts = {iuc: 0 for iuc in data_iucs}
-                for sid in last_seen:
-                    counts[last_iuc[sid]] = counts.get(last_iuc[sid], 0) + 1
-
-            detail = "  ".join(
-                f"IUC{iuc}={counts.get(iuc, 0)}" for iuc in sorted(data_iucs)
-            )
             print(
                 time.strftime("%H:%M:%S"),
-                f"active data SIDs: {total:4d}",
-                detail,
+                f"aktive Ranging-SIDs ≈ {count}",
                 flush=True,
             )
 
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("\nBeendet.")
         return 0
     finally:
-        tshark.terminate()
-        zap.terminate()
+        for process in (tshark, zap):
+            if process.poll() is None:
+                process.terminate()
+        for process in (tshark, zap):
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 if __name__ == "__main__":
