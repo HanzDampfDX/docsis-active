@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -52,7 +53,7 @@ def require_command(name):
 
 def main():
     args = parse_args()
-    config = subprocess.os.path.expanduser(args.config)
+    config = os.path.expanduser(args.config)
 
     if args.window <= 0 or args.interval <= 0:
         print("error: --window and --interval must be > 0", file=sys.stderr)
@@ -130,7 +131,6 @@ def main():
                 if iuc not in data_iucs:
                     continue
 
-                # Ignore SID 0 and the DOCSIS broadcast SID 0x3fff.
                 if sid <= 0 or sid == 0x3FFF:
                     continue
 
