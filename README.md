@@ -4,6 +4,10 @@
 
 It tunes a DOCSIS 3.0 downstream channel with `dvbv5-zap`, pipes the MPEG transport stream into `tshark`, extracts `docsis_map.sid` together with `docsis_map.iuc`, and counts unique non-reserved SIDs seen with **IUC 3 or IUC 4** during a rolling time window.
 
+## Credits and related work
+
+Background material, related projects and acknowledgements used while developing this monitor are collected in the separate **[docsis-credits](https://github.com/HanzDampfDX/docsis-credits)** repository.
+
 ## Example output
 
 ```text
@@ -117,10 +121,6 @@ Value too large for defined data type
 The included `docsis-all.conf.example` contains example EuroDOCSIS 3.0 256-QAM channels using 6.952 MSym/s. Frequencies are network-specific and must be adjusted to the local cable network.
 
 A conventional DVB-C tuner can demodulate DOCSIS 3.0 SC-QAM downstreams. It cannot normally demodulate a DOCSIS 3.1 OFDM block directly, but DOCSIS management traffic visible on the selected SC-QAM channel can still be useful for segment observation.
-
-## Credits and related work
-
-Background material, related projects and acknowledgements used while developing this monitor are collected in the separate **[docsis-credits](https://github.com/HanzDampfDX/docsis-credits)** repository.
 
 ## Privacy
 
