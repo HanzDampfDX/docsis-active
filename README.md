@@ -1,8 +1,8 @@
 # docsis-active
 
-`docsis-active.py` is a small Linux monitor that estimates the number of recently active DOCSIS cable-modem SIDs by observing **Ranging Response** messages on a DOCSIS downstream channel.
+`docsis-active.py` is a small Linux monitor for estimating DOCSIS segment activity by observing **ranging/maintenance SIDs in downstream MAP messages**.
 
-It tunes a DOCSIS 3.0 downstream channel with `dvbv5-zap`, pipes the MPEG transport stream into `tshark`, extracts `docsis_rngrsp.sid`, and counts unique ranging SIDs seen within a rolling time window.
+It tunes a DOCSIS 3.0 downstream channel with `dvbv5-zap`, pipes the MPEG transport stream into `tshark`, extracts `docsis_map.sid` together with `docsis_map.iuc`, and counts unique non-reserved SIDs seen with **IUC 3 or IUC 4** during a rolling time window.
 
 ## Example output
 
@@ -24,9 +24,16 @@ During the first 30 seconds after startup the counter normally rises as the roll
 
 ## What it measures
 
-The monitor records the timestamp of every SID seen in a DOCSIS Ranging Response. A SID remains "active" until it has not been observed for the configured window, 30 seconds by default.
+The monitor inspects DOCSIS MAP messages and records the timestamp of SIDs attached to maintenance/ranging entries:
 
-This is intended as a **segment population/activity estimate**. The `≈` symbol is deliberate: a ranging SID is not a customer identity, and the observed count should not be treated as an exact subscriber count. DOCSIS version, CMTS implementation, ranging behaviour, channel bonding, packet loss and the selected observation window can all influence the result.
+- IUC 3 — Initial Maintenance
+- IUC 4 — Station Maintenance
+
+SID 0 and the broadcast SID `0x3fff` are ignored. A SID remains active until it has not been seen for the configured rolling window, 30 seconds by default.
+
+This approach usually produces a broader segment activity estimate than counting only actual Ranging Response (`RNG-RSP`) messages, because it observes maintenance opportunities announced by the CMTS scheduler.
+
+The `≈` symbol is deliberate. The result is an **estimate based on observed MAP SIDs**, not a guaranteed exact number of physical cable modems or subscribers. CMTS implementation, DOCSIS version, channel bonding, packet loss and the selected observation window can influence the result.
 
 The tool does not decode customer payload data and does not attempt to associate SIDs with subscriber identities.
 
@@ -85,7 +92,8 @@ dvbv5-zap
    v
 tshark DOCSIS dissector
    |
-   | docsis_rngrsp.sid
+   | docsis_map.sid + docsis_map.iuc
+   | keep IUC 3/4
    v
 rolling unique-SID counter
 ```
@@ -93,7 +101,7 @@ rolling unique-SID counter
 The relevant tshark operation is conceptually equivalent to:
 
 ```bash
-tshark -l -r - -Y 'docsis_rngrsp.sid' -T fields -E aggregator=, -E occurrence=a -e docsis_rngrsp.sid
+tshark -l -r - -Y 'docsis_map' -T fields -E separator=';' -E aggregator=',' -E occurrence=a -e docsis_map.sid -e docsis_map.iuc
 ```
 
 `dvbv5-zap` is used as the DVB DVR reader rather than `cat /dev/dvb/adapter0/dvr0`. On some DVB devices direct reads can terminate on a kernel DVB buffer overrun with an error such as:
